@@ -1,4 +1,4 @@
-import os, time, logging, sqlite3, speech_recognition as sr
+import os, time, logging, sqlite3, speech_recognition as sr, threading
 from datetime import datetime
 from collections import defaultdict
 from cryptography.fernet import Fernet
@@ -11,6 +11,7 @@ from docx import Document
 from PIL import Image
 import pytesseract
 from pydub import AudioSegment
+from flask import Flask
 
 # ==========================================================
 # ⚙️ تنظیمات
@@ -26,7 +27,7 @@ class Config:
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================================
-# 🗄️ دیتابیس امن (رمزنگاری شده)
+# 🗄️ دیتابیس امن
 # ==========================================================
 class SecureDatabase:
     def __init__(self):
@@ -44,7 +45,6 @@ class SecureDatabase:
         self.conn.commit()
     
     def generate_secret_key(self): return Fernet.generate_key().decode()
-    
     def get_or_create_user_key(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT secret_key FROM users WHERE user_id = ?', (user_id,))
@@ -54,114 +54,94 @@ class SecureDatabase:
         c.execute('INSERT INTO users (user_id, secret_key) VALUES (?, ?)', (user_id, new_key))
         self.conn.commit()
         return new_key
-    
     def encrypt(self, text, key): return Fernet(key.encode()).encrypt(text.encode()).decode() if text else ""
     def decrypt(self, encrypted_text, key):
         try: return Fernet(key.encode()).decrypt(encrypted_text.encode()).decode() if encrypted_text else ""
-        except: return "[خطا در رمزگشایی]"
-    
+        except: return "[خطا]"
     def save_translation(self, user_id, source_text, translated_text, source_lang, target_lang):
         key = self.get_or_create_user_key(user_id)
         c = self.conn.cursor()
-        c.execute('INSERT INTO translations (user_id, encrypted_source, encrypted_target, source_lang, target_lang) VALUES (?, ?, ?, ?, ?)', 
-                  (user_id, self.encrypt(source_text, key), self.encrypt(translated_text, key), source_lang, target_lang))
+        c.execute('INSERT INTO translations (user_id, encrypted_source, encrypted_target, source_lang, target_lang) VALUES (?, ?, ?, ?, ?)', (user_id, self.encrypt(source_text, key), self.encrypt(translated_text, key), source_lang, target_lang))
         word_count = len(source_text.split())
         c.execute('INSERT OR IGNORE INTO user_stats (user_id) VALUES (?)', (user_id,))
         c.execute('UPDATE user_stats SET total_translations = total_translations + 1, total_words = total_words + ?, last_activity = ? WHERE user_id = ?', (word_count, datetime.now(), user_id))
         c.execute('INSERT OR IGNORE INTO language_usage (user_id, lang_code) VALUES (?, ?)', (user_id, target_lang))
         c.execute('UPDATE language_usage SET count = count + 1 WHERE user_id = ? AND lang_code = ?', (user_id, target_lang))
         self.conn.commit()
-    
     def get_user_stats(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT total_translations, total_words, last_activity FROM user_stats WHERE user_id = ?', (user_id,))
         return c.fetchone()
-    
     def get_top_languages(self, user_id, limit=3):
         c = self.conn.cursor()
         c.execute('SELECT lang_code, count FROM language_usage WHERE user_id = ? ORDER BY count DESC LIMIT ?', (user_id, limit))
         return c.fetchall()
-    
     def get_user_history(self, user_id, key, limit=5):
         c = self.conn.cursor()
         c.execute('SELECT encrypted_source, encrypted_target, source_lang, target_lang, timestamp FROM translations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?', (user_id, limit))
         return [(self.decrypt(r[0], key), self.decrypt(r[1], key), r[2], r[3], r[4]) for r in c.fetchall()]
-    
     def get_random_word_for_game(self, user_id, key):
         c = self.conn.cursor()
         c.execute('SELECT id, encrypted_source, encrypted_target, source_lang, target_lang FROM translations WHERE user_id = ? ORDER BY RANDOM() LIMIT 1', (user_id,))
         r = c.fetchone()
         return (r[0], self.decrypt(r[1], key), self.decrypt(r[2], key), r[3], r[4]) if r else None
-    
     def update_game_progress(self, user_id, word_id, correct):
         c = self.conn.cursor()
         c.execute('INSERT OR IGNORE INTO game_progress (user_id, word_id) VALUES (?, ?)', (user_id, word_id))
         field = 'correct_answers' if correct else 'wrong_answers'
         c.execute(f'UPDATE game_progress SET {field} = {field} + 1, last_played = ? WHERE user_id = ? AND word_id = ?', (datetime.now(), user_id, word_id))
         self.conn.commit()
-    
     def get_user_theme(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT theme FROM user_stats WHERE user_id = ?', (user_id,))
         r = c.fetchone()
         return r[0] if r else 'light'
-    
     def set_user_theme(self, user_id, theme):
         c = self.conn.cursor()
         c.execute('INSERT OR IGNORE INTO user_stats (user_id) VALUES (?)', (user_id,))
         c.execute('UPDATE user_stats SET theme = ? WHERE user_id = ?', (theme, user_id))
         self.conn.commit()
-    
     def reset_user(self, user_id):
         c = self.conn.cursor()
         for table in ['translations', 'user_stats', 'language_usage', 'game_progress', 'admin_chat', 'users']:
             c.execute(f'DELETE FROM {table} WHERE user_id = ?', (user_id,))
         self.conn.commit()
-    
     def save_device_info(self, user_id, device_info):
         c = self.conn.cursor()
         c.execute('INSERT OR IGNORE INTO users (user_id, secret_key) VALUES (?, ?)', (user_id, self.generate_secret_key()))
         c.execute('UPDATE users SET device_info = ?, consent_given = 1 WHERE user_id = ?', (device_info, user_id))
         self.conn.commit()
-    
     def has_consent(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT consent_given FROM users WHERE user_id = ?', (user_id,))
         r = c.fetchone()
         return r and r[0] == 1
-    
     def set_chat_consent(self, user_id, consent):
         c = self.conn.cursor()
         c.execute('INSERT OR IGNORE INTO users (user_id, secret_key) VALUES (?, ?)', (user_id, self.generate_secret_key()))
         c.execute('UPDATE users SET chat_consent = ? WHERE user_id = ?', (1 if consent else 0, user_id))
         self.conn.commit()
-    
     def has_chat_consent(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT chat_consent FROM users WHERE user_id = ?', (user_id,))
         r = c.fetchone()
         return r and r[0] == 1
-    
     def save_chat_message(self, user_id, message, sender):
         c = self.conn.cursor()
         c.execute('INSERT INTO admin_chat (user_id, message, sender) VALUES (?, ?, ?)', (user_id, message, sender))
         self.conn.commit()
-    
     def get_chat_history(self, user_id, limit=20):
         c = self.conn.cursor()
         c.execute('SELECT message, sender, timestamp FROM admin_chat WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?', (user_id, limit))
         return c.fetchall()[::-1]
-    
     def get_users_with_chat_consent(self):
         c = self.conn.cursor()
         c.execute('SELECT user_id, device_info FROM users WHERE chat_consent = 1')
         return c.fetchall()
-    
     def get_all_user_ids(self):
         c = self.conn.cursor()
         c.execute('SELECT user_id FROM users')
         return [row[0] for row in c.fetchall()]
-    
     def get_admin_dashboard(self):
         c = self.conn.cursor()
         c.execute('SELECT COUNT(*) FROM users'); total_users = c.fetchone()[0]
@@ -172,7 +152,7 @@ class SecureDatabase:
         return {'total_users': total_users, 'total_translations': total_trans, 'total_words': total_words, 'chat_consent_users': chat_users, 'top_languages': top_langs}
 
 db = SecureDatabase()
-LANGUAGES = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'es': '🇪🇸 اسپانیایی', 'tr': '🇹🇷 ترکی', 'ru': '🇷🇺 روسی'}
+LANGUAGES = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩 آلمانی', 'es': '🇸 اسپانیایی', 'tr': '🇹🇷 ترکی', 'ru': '🇷🇺 روسی'}
 
 class RateLimiter:
     def __init__(self): self.user_requests = defaultdict(list)
@@ -184,30 +164,27 @@ class RateLimiter:
         return True
 
 rate_limiter = RateLimiter()
-THEMES = {'light': {'header': '🌞', 'success': '✅', 'error': '❌'}, 'dark': {'header': '🌙', 'success': '✓', 'error': '✗'}}
+THEMES = {'light': {'header': '', 'success': '✅', 'error': '❌'}, 'dark': {'header': '', 'success': '✓', 'error': '✗'}}
 
 # ==========================================================
-# 🤖 هندلرهای ربات
+# 🤖 هندلرها
 # ==========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     secret_key = db.get_or_create_user_key(user_id)
     theme = THEMES[db.get_user_theme(user_id)]
-    
     if 'secret_shown' not in context.user_data:
         await update.message.reply_text(f"🔐 **امانت امنیتی شما**\n\nکلید منحصر به فرد:\n\n`{secret_key}`\n\n⚠️ بدون این کلید، هیچ‌کس (حتی ادمین) به ترجمه‌های شما دسترسی ندارد.", parse_mode='Markdown')
         context.user_data['secret_shown'] = True
-    
     if not db.has_consent(user_id):
         keyboard = [[InlineKeyboardButton("✅ موافقم", callback_data='consent_device')], [InlineKeyboardButton("❌ رد می‌کنم", callback_data='decline_device')]]
         await update.message.reply_text("📱 **حریم خصوصی**\nذخیره اطلاعات اولیه (نام، یوزرنیم) برای بهبود خدمات.\nآیا موافقت می‌کنید؟", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
         return
-    
     keyboard = [
         [InlineKeyboardButton("🌐 ترجمه متن", callback_data='translate_text'), InlineKeyboardButton("🖼️ ترجمه عکس", callback_data='translate_photo_info')],
-        [InlineKeyboardButton("🎤 ترجمه صوتی", callback_data='translate_voice_info'), InlineKeyboardButton("💬 مکالمه دوزبانه", callback_data='set_conv_mode')],
+        [InlineKeyboardButton(" ترجمه صوتی", callback_data='translate_voice_info'), InlineKeyboardButton("💬 مکالمه دوزبانه", callback_data='set_conv_mode')],
         [InlineKeyboardButton("📄 ترجمه فایل", callback_data='translate_file_info'), InlineKeyboardButton("🎮 بازی", callback_data='start_game')],
-        [InlineKeyboardButton("📊 آمار", callback_data='my_stats'), InlineKeyboardButton("📜 تاریخچه", callback_data='my_history')],
+        [InlineKeyboardButton("📊 آمار", callback_data='my_stats'), InlineKeyboardButton(" تاریخچه", callback_data='my_history')],
         [InlineKeyboardButton("🔑 کلید امانت", callback_data='show_key'), InlineKeyboardButton("💬 چت ادمین", callback_data='admin_chat_menu')],
         [InlineKeyboardButton(f"{theme['header']} تغییر تم", callback_data='toggle_theme'), InlineKeyboardButton("⚠️ ریست", callback_data='confirm_reset')]
     ]
@@ -272,14 +249,12 @@ async def handle_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     if context.user_data.get('action') == 'chatting_with_admin':
         if db.has_chat_consent(user_id):
             db.save_chat_message(user_id, update.message.text, "user")
             await update.message.reply_text("✅ به ادمین ارسال شد.")
         context.user_data['action'] = None
         return
-
     if context.user_data.get('conv_mode'):
         is_fa = any('\u0600' <= c <= '\u06FF' for c in update.message.text)
         target = 'en' if is_fa else 'fa'
@@ -288,26 +263,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton("🔄 خروج", callback_data='exit_conv')]]
             await update.message.reply_text(f"🔄 {translated}", reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
-            await update.message.reply_text(f"❌ خطا: {e}")
+            await update.message.reply_text(f" خطا: {e}")
         return
-
     if context.user_data.get('action') == 'playing_game':
         await check_game_answer(update, context)
         return
-
     if context.user_data.get('action') != 'waiting_for_text':
         await update.message.reply_text("لطفاً اول یک گزینه از منو انتخاب کن! /start")
         return
-    
     text = update.message.text.strip()
     if len(text) > Config.MAX_TEXT_LENGTH:
         await update.message.reply_text(f"⚠️ متن طولانی است!")
         return
-    
     if not rate_limiter.is_allowed(user_id):
         await update.message.reply_text("⚠️ ۱ دقیقه صبر کن.")
         return
-
     target_lang = context.user_data.get('target_lang', 'fa')
     theme = THEMES[db.get_user_theme(user_id)]
     try:
@@ -315,7 +285,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translated_text = translator.translate(text)
         db.save_translation(user_id, text, translated_text, translator._source, target_lang)
         kb = [[InlineKeyboardButton("🔊 تلفظ", callback_data=f'audio_{translated_text[:100]}')], [InlineKeyboardButton("🔄 جدید", callback_data='translate_text')]]
-        await update.message.reply_text(f"{theme['success']} ترجمه شد.\n\n🔤 {translator._source} → {LANGUAGES.get(target_lang)}\n\n📝 {translated_text}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await update.message.reply_text(f"{theme['success']} ترجمه شد.\n\n🔤 {translator._source} → {LANGUAGES.get(target_lang)}\n\n {translated_text}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"{theme['error']} خطا: {e}")
 
@@ -410,7 +380,7 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data['game_word'] = word
     context.user_data['action'] = 'playing_game'
-    await update.callback_query.edit_message_text(f"🎮 ترجمه کن:\n\n📝 {word[1]}")
+    await update.callback_query.edit_message_text(f"🎮 ترجمه کن:\n\n {word[1]}")
 
 async def check_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     word = context.user_data.get('game_word')
@@ -438,7 +408,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     stats = db.get_user_stats(update.effective_user.id)
     top_langs = db.get_top_languages(update.effective_user.id, 3)
-    msg = f"📊 آمار:\n🔢 ترجمه‌ها: {stats[0] if stats else 0}\n📝 کلمات: {stats[1] if stats else 0}\n"
+    msg = f"📊 آمار:\n🔢 ترجمه‌ها: {stats[0] if stats else 0}\n کلمات: {stats[1] if stats else 0}\n"
     if top_langs: msg += "\n🏆 زبان‌ها:\n" + "\n".join([f"• {LANGUAGES.get(l[0], l[0])}: {l[1]}" for l in top_langs])
     await update.callback_query.edit_message_text(msg)
 
@@ -447,7 +417,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     history = db.get_user_history(user_id, db.get_or_create_user_key(user_id), 5)
     if history:
-        msg = "📜 ۵ آخر:\n\n" + "\n".join([f"{i}. {h[0][:20]}... → {h[1][:20]}..." for i, h in enumerate(history, 1)])
+        msg = "📜  آخر:\n\n" + "\n".join([f"{i}. {h[0][:20]}... → {h[1][:20]}..." for i, h in enumerate(history, 1)])
         await update.callback_query.edit_message_text(msg)
     else:
         await update.callback_query.edit_message_text("تاریخچه‌ای نداری!")
@@ -503,7 +473,7 @@ async def admin_chat_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_chat_target'] = target_user_id
     context.user_data['action'] = 'admin_chatting'
     history = db.get_chat_history(target_user_id, 10)
-    msg = f"💬 چت با {target_user_id}:\n\n" + "\n".join([f"{'👤' if s=='user' else '🛡️'} {m}" for m, s, t in history]) if history else f"💬 چت با {target_user_id}:\n\nپیام بفرستید:"
+    msg = f" چت با {target_user_id}:\n\n" + "\n".join([f"{'' if s=='user' else '🛡️'} {m}" for m, s, t in history]) if history else f"💬 چت با {target_user_id}:\n\nپیام بفرستید:"
     await update.callback_query.edit_message_text(msg)
 
 async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -523,7 +493,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("⚠️ مثال: `/broadcast سلام`", parse_mode='Markdown')
         return
-    await update.message.reply_text("⏳ در حال ارسال...")
+    await update.message.reply_text(" در حال ارسال...")
     users = db.get_all_user_ids()
     success, fail = 0, 0
     for uid in users:
@@ -536,9 +506,23 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ کل: {len(users)} | موفق: {success} | ناموفق: {fail}")
 
 # ==========================================================
-# ▶️ اجرای اصلی (فقط Polling - بدون Webhook)
+# 🌐 سرور Flask (برای راضی کردن Render)
 # ==========================================================
-def main():
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ ربات مترجم امن فعال است! (24/7)"
+
+@flask_app.route('/health')
+def health():
+    return {"status": "ok"}, 200
+
+# ==========================================================
+# ▶️ اجرای اصلی: Flask + Polling همزمان
+# ==========================================================
+def run_bot():
+    """اجرای ربات در یک thread جداگانه"""
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -564,7 +548,7 @@ def main():
     app.add_handler(CallbackQueryHandler(set_conv_mode, pattern='^set_conv_mode$'))
     app.add_handler(CallbackQueryHandler(exit_conv, pattern='^exit_conv$'))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$'))
-    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("🖼️ عکس بفرستید."), pattern='^translate_photo_info$'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("️ عکس بفرستید."), pattern='^translate_photo_info$'))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("🎤 ویس بفرستید."), pattern='^translate_voice_info$'))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("📄 فایل بفرستید."), pattern='^translate_file_info$'))
     
@@ -573,8 +557,18 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
-    print("✅ ربات با Polling فعال شد! (در حال گوش دادن به پیام‌ها...)")
+    print("✅ ربات با Polling فعال شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+def main():
+    # اجرای ربات در thread جداگانه
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # اجرای Flask برای Render
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🌐 سرور Flask روی پورت {port} فعال شد!")
+    flask_app.run(host='0.0.0.0', port=port)
 
 if __name__ == '__main__':
     main()
