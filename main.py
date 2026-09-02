@@ -1,4 +1,4 @@
-import os, time, logging, sqlite3, speech_recognition as sr, threading
+import os, time, logging, sqlite3, speech_recognition as sr
 from datetime import datetime
 from collections import defaultdict
 from cryptography.fernet import Fernet
@@ -11,7 +11,6 @@ from docx import Document
 from PIL import Image
 import pytesseract
 from pydub import AudioSegment
-from flask import Flask
 
 # ==========================================================
 # ⚙️ تنظیمات
@@ -23,11 +22,13 @@ class Config:
     RATE_LIMIT = 30
     MAX_TEXT_LENGTH = 4000
     ALLOWED_FILE_TYPES = ['pdf', 'docx', 'txt']
+    # آدرس دقیق سرویس تو در Render
+    RENDER_URL = "https://translator-bot-z4wh.onrender.com"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================================
-# 🗄️ دیتابیس امن
+# 🗄️ دیتابیس امن (همان کد قبلی)
 # ==========================================================
 class SecureDatabase:
     def __init__(self):
@@ -152,7 +153,7 @@ class SecureDatabase:
         return {'total_users': total_users, 'total_translations': total_trans, 'total_words': total_words, 'chat_consent_users': chat_users, 'top_languages': top_langs}
 
 db = SecureDatabase()
-LANGUAGES = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩 آلمانی', 'es': '🇸 اسپانیایی', 'tr': '🇹🇷 ترکی', 'ru': '🇷🇺 روسی'}
+LANGUAGES = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'es': '🇪🇸 اسپانیایی', 'tr': '🇹🇷 ترکی', 'ru': '🇷🇺 روسی'}
 
 class RateLimiter:
     def __init__(self): self.user_requests = defaultdict(list)
@@ -164,10 +165,10 @@ class RateLimiter:
         return True
 
 rate_limiter = RateLimiter()
-THEMES = {'light': {'header': '', 'success': '✅', 'error': '❌'}, 'dark': {'header': '', 'success': '✓', 'error': '✗'}}
+THEMES = {'light': {'header': '🌞', 'success': '✅', 'error': '❌'}, 'dark': {'header': '🌙', 'success': '✓', 'error': '✗'}}
 
 # ==========================================================
-# 🤖 هندلرها
+# 🤖 هندلرها (همان کدهای قبلی)
 # ==========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -182,9 +183,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyboard = [
         [InlineKeyboardButton("🌐 ترجمه متن", callback_data='translate_text'), InlineKeyboardButton("🖼️ ترجمه عکس", callback_data='translate_photo_info')],
-        [InlineKeyboardButton(" ترجمه صوتی", callback_data='translate_voice_info'), InlineKeyboardButton("💬 مکالمه دوزبانه", callback_data='set_conv_mode')],
+        [InlineKeyboardButton("🎤 ترجمه صوتی", callback_data='translate_voice_info'), InlineKeyboardButton("💬 مکالمه دوزبانه", callback_data='set_conv_mode')],
         [InlineKeyboardButton("📄 ترجمه فایل", callback_data='translate_file_info'), InlineKeyboardButton("🎮 بازی", callback_data='start_game')],
-        [InlineKeyboardButton("📊 آمار", callback_data='my_stats'), InlineKeyboardButton(" تاریخچه", callback_data='my_history')],
+        [InlineKeyboardButton("📊 آمار", callback_data='my_stats'), InlineKeyboardButton("📜 تاریخچه", callback_data='my_history')],
         [InlineKeyboardButton("🔑 کلید امانت", callback_data='show_key'), InlineKeyboardButton("💬 چت ادمین", callback_data='admin_chat_menu')],
         [InlineKeyboardButton(f"{theme['header']} تغییر تم", callback_data='toggle_theme'), InlineKeyboardButton("⚠️ ریست", callback_data='confirm_reset')]
     ]
@@ -263,7 +264,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = [[InlineKeyboardButton("🔄 خروج", callback_data='exit_conv')]]
             await update.message.reply_text(f"🔄 {translated}", reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
-            await update.message.reply_text(f" خطا: {e}")
+            await update.message.reply_text(f"❌ خطا: {e}")
         return
     if context.user_data.get('action') == 'playing_game':
         await check_game_answer(update, context)
@@ -285,7 +286,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translated_text = translator.translate(text)
         db.save_translation(user_id, text, translated_text, translator._source, target_lang)
         kb = [[InlineKeyboardButton("🔊 تلفظ", callback_data=f'audio_{translated_text[:100]}')], [InlineKeyboardButton("🔄 جدید", callback_data='translate_text')]]
-        await update.message.reply_text(f"{theme['success']} ترجمه شد.\n\n🔤 {translator._source} → {LANGUAGES.get(target_lang)}\n\n {translated_text}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await update.message.reply_text(f"{theme['success']} ترجمه شد.\n\n🔤 {translator._source} → {LANGUAGES.get(target_lang)}\n\n📝 {translated_text}", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"{theme['error']} خطا: {e}")
 
@@ -380,7 +381,7 @@ async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data['game_word'] = word
     context.user_data['action'] = 'playing_game'
-    await update.callback_query.edit_message_text(f"🎮 ترجمه کن:\n\n {word[1]}")
+    await update.callback_query.edit_message_text(f"🎮 ترجمه کن:\n\n📝 {word[1]}")
 
 async def check_game_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     word = context.user_data.get('game_word')
@@ -408,7 +409,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     stats = db.get_user_stats(update.effective_user.id)
     top_langs = db.get_top_languages(update.effective_user.id, 3)
-    msg = f"📊 آمار:\n🔢 ترجمه‌ها: {stats[0] if stats else 0}\n کلمات: {stats[1] if stats else 0}\n"
+    msg = f"📊 آمار:\n🔢 ترجمه‌ها: {stats[0] if stats else 0}\n📝 کلمات: {stats[1] if stats else 0}\n"
     if top_langs: msg += "\n🏆 زبان‌ها:\n" + "\n".join([f"• {LANGUAGES.get(l[0], l[0])}: {l[1]}" for l in top_langs])
     await update.callback_query.edit_message_text(msg)
 
@@ -417,7 +418,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     history = db.get_user_history(user_id, db.get_or_create_user_key(user_id), 5)
     if history:
-        msg = "📜  آخر:\n\n" + "\n".join([f"{i}. {h[0][:20]}... → {h[1][:20]}..." for i, h in enumerate(history, 1)])
+        msg = "📜 ۵ آخر:\n\n" + "\n".join([f"{i}. {h[0][:20]}... → {h[1][:20]}..." for i, h in enumerate(history, 1)])
         await update.callback_query.edit_message_text(msg)
     else:
         await update.callback_query.edit_message_text("تاریخچه‌ای نداری!")
@@ -473,7 +474,7 @@ async def admin_chat_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_chat_target'] = target_user_id
     context.user_data['action'] = 'admin_chatting'
     history = db.get_chat_history(target_user_id, 10)
-    msg = f" چت با {target_user_id}:\n\n" + "\n".join([f"{'' if s=='user' else '🛡️'} {m}" for m, s, t in history]) if history else f"💬 چت با {target_user_id}:\n\nپیام بفرستید:"
+    msg = f"💬 چت با {target_user_id}:\n\n" + "\n".join([f"{'👤' if s=='user' else '🛡️'} {m}" for m, s, t in history]) if history else f"💬 چت با {target_user_id}:\n\nپیام بفرستید:"
     await update.callback_query.edit_message_text(msg)
 
 async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,7 +494,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("⚠️ مثال: `/broadcast سلام`", parse_mode='Markdown')
         return
-    await update.message.reply_text(" در حال ارسال...")
+    await update.message.reply_text("⏳ در حال ارسال...")
     users = db.get_all_user_ids()
     success, fail = 0, 0
     for uid in users:
@@ -506,23 +507,9 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ کل: {len(users)} | موفق: {success} | ناموفق: {fail}")
 
 # ==========================================================
-# 🌐 سرور Flask (برای راضی کردن Render)
+# ▶️ اجرای اصلی با Webhook (روش حرفه‌ای و پایدار)
 # ==========================================================
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return "✅ ربات مترجم امن فعال است! (24/7)"
-
-@flask_app.route('/health')
-def health():
-    return {"status": "ok"}, 200
-
-# ==========================================================
-# ▶️ اجرای اصلی: Flask + Polling همزمان
-# ==========================================================
-def run_bot():
-    """اجرای ربات در یک thread جداگانه"""
+def main():
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -548,7 +535,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(set_conv_mode, pattern='^set_conv_mode$'))
     app.add_handler(CallbackQueryHandler(exit_conv, pattern='^exit_conv$'))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$'))
-    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("️ عکس بفرستید."), pattern='^translate_photo_info$'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("🖼️ عکس بفرستید."), pattern='^translate_photo_info$'))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("🎤 ویس بفرستید."), pattern='^translate_voice_info$'))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.edit_message_text("📄 فایل بفرستید."), pattern='^translate_file_info$'))
     
@@ -557,18 +544,17 @@ def run_bot():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
-    print("✅ ربات با Polling فعال شد!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-def main():
-    # اجرای ربات در thread جداگانه
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    # تنظیم Webhook برای Render
+    webhook_url = f"{Config.RENDER_URL}/{Config.BOT_TOKEN}"
     
-    # اجرای Flask برای Render
-    port = int(os.environ.get('PORT', 10000))
-    print(f"🌐 سرور Flask روی پورت {port} فعال شد!")
-    flask_app.run(host='0.0.0.0', port=port)
+    print("✅ ربات با Webhook فعال شد و آماده دریافت پیام است!")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get('PORT', 8080)),
+        url_path=Config.BOT_TOKEN,
+        webhook_url=webhook_url,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == '__main__':
     main()
