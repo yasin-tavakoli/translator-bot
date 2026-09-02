@@ -1,0 +1,10 @@
+python-telegram-bot
+deep-translator
+gtts
+PyPDF2
+python-docx
+cryptography
+pytesseract
+Pillow
+SpeechRecognition
+pydub
