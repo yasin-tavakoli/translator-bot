@@ -1,10 +1,10 @@
-import os, time, logging, speech_recognition as sr, hashlib, re
+import os, time, logging, speech_recognition as sr
 from datetime import datetime
 from collections import defaultdict
 from cryptography.fernet import Fernet
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import translators as ts
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 from gtts import gTTS
 import PyPDF2
 from docx import Document
@@ -20,7 +20,7 @@ from psycopg2.extras import RealDictCursor
 class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN', '8791676273:AAEIw5JaJmZk9f7YqOdO1Xq1Fm0KBkvteTQ')
     ADMIN_IDS = [5138190544]
-    MAX_FILE_SIZE = 20971520  # 20MB
+    MAX_FILE_SIZE = 20971520
     RATE_LIMIT = 30
     MAX_TEXT_LENGTH = 5000
     ALLOWED_FILE_TYPES = ['pdf', 'docx', 'txt']
@@ -47,13 +47,13 @@ class AdvancedRateLimiter:
 rate_limiter = AdvancedRateLimiter()
 
 # ==========================================================
-# 🗄️ دیتابیس Supabase
+# ️ دیتابیس
 # ==========================================================
 class SecureDatabase:
     def __init__(self):
         try:
             self.conn = psycopg2.connect(Config.DATABASE_URL)
-            logger.info("✅ اتصال به دیتابیس ابری Supabase برقرار شد")
+            logger.info("✅ اتصال به دیتابیس Supabase برقرار شد")
         except Exception as e:
             logger.error(f"❌ خطا در اتصال به دیتابیس: {e}")
             raise
@@ -68,7 +68,6 @@ class SecureDatabase:
             c.execute('UPDATE users SET last_active = NOW() WHERE user_id = %s', (user_id,))
             self.conn.commit()
             return r['secret_key']
-        
         new_key = self.generate_secret_key()
         c.execute('''INSERT INTO users (user_id, username, first_name, secret_key, last_active) VALUES (%s, %s, %s, %s, NOW())''', (user_id, username, first_name, new_key))
         c.execute('INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING', (user_id,))
@@ -78,21 +77,14 @@ class SecureDatabase:
     def encrypt(self, text, key): 
         return Fernet(key.encode()).encrypt(text.encode()).decode() if text else ""
     
-    def decrypt(self, encrypted_text, key):
-        try: return Fernet(key.encode()).decrypt(encrypted_text.encode()).decode() if encrypted_text else ""
-        except: return "[خطا]"
-    
     def save_translation(self, user_id, source_text, translated_text, source_lang, target_lang, trans_type='text'):
         key = self.get_or_create_user(user_id)
         c = self.conn.cursor()
         encrypted_source = self.encrypt(source_text, key)
         encrypted_target = self.encrypt(translated_text, key)
         word_count = len(source_text.split())
-        
-        c.execute('''INSERT INTO translations (user_id, encrypted_source, encrypted_target, source_lang, target_lang, translation_type, word_count)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+        c.execute('''INSERT INTO translations (user_id, encrypted_source, encrypted_target, source_lang, target_lang, translation_type, word_count) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
                   (user_id, encrypted_source, encrypted_target, source_lang, target_lang, trans_type, word_count))
-        
         c.execute('''UPDATE user_stats SET total_translations = total_translations + 1, total_words = total_words + %s, last_activity = NOW() WHERE user_id = %s''', (word_count, user_id))
         self.conn.commit()
 
@@ -106,6 +98,13 @@ class SecureDatabase:
         c.execute('SELECT user_id FROM users')
         return [row[0] for row in c.fetchall()]
     
+    def get_admin_dashboard(self):
+        c = self.conn.cursor()
+        c.execute('SELECT COUNT(*) FROM users'); total = c.fetchone()[0]
+        c.execute('SELECT COALESCE(SUM(total_translations), 0) FROM user_stats'); trans = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM users WHERE last_active > NOW() - INTERVAL \'7 days\''); active = c.fetchone()[0]
+        return {'total_users': total, 'total_translations': trans, 'active_users': active}
+
     def has_consent(self, user_id):
         c = self.conn.cursor()
         c.execute('SELECT consent_given FROM users WHERE user_id = %s', (user_id,))
@@ -120,41 +119,48 @@ class SecureDatabase:
 db = SecureDatabase()
 
 # ==========================================================
-# 🌐 سیستم ترجمه هوشمند با چندین موتور
+# 🌐 سیستم ترجمه هوشمند با Retry و Fallback
 # ==========================================================
-def smart_translate(text, target_lang='fa', source_lang='auto'):
-    """
-    ترجمه هوشمند با fallback به چندین موتور
-    """
-    # تاخیر کوتاه برای جلوگیری از rate limit
-    time.sleep(0.5)
+def smart_translate(text, target_lang='fa', source_lang='auto', max_retries=3):
+    """ترجمه با چندین تلاش و چندین موتور"""
+    if not text or not text.strip():
+        return "", "none"
     
-    # تلاش اول: Google Translate (از طریق translators)
-    try:
-        translated = ts.google(text, from_language=source_lang, to_language=target_lang)
-        return translated, 'google'
-    except Exception as e:
-        logger.warning(f"Google Translate failed: {e}")
+    last_error = None
     
-    # تلاش دوم: Bing Translator
-    try:
-        translated = ts.bing(text, from_language=source_lang, to_language=target_lang)
-        return translated, 'bing'
-    except Exception as e:
-        logger.warning(f"Bing Translate failed: {e}")
+    for attempt in range(max_retries):
+        # تاخیر بین تلاش‌ها برای جلوگیری از بلاک شدن
+        if attempt > 0:
+            time.sleep(2 * attempt)
+        
+        # تلاش ۱: Google Translate
+        try:
+            translator = GoogleTranslator(source=source_lang, target=target_lang)
+            result = translator.translate(text)
+            if result and result.strip() and result != text:
+                logger.info(f"✅ Translation success via Google (attempt {attempt+1})")
+                return result, 'google'
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Google attempt {attempt+1} failed: {type(e).__name__}")
+        
+        # تلاش ۲: MyMemory (رایگان و بدون محدودیت سخت)
+        try:
+            lang_map = {'fa': 'persian', 'en': 'english', 'ar': 'arabic', 'fr': 'french', 'de': 'german', 'tr': 'turkish'}
+            target_en = lang_map.get(target_lang, target_lang)
+            translator = MyMemoryTranslator(source=source_lang, target=target_en)
+            result = translator.translate(text)
+            if result and result.strip():
+                logger.info(f"✅ Translation success via MyMemory (attempt {attempt+1})")
+                return result, 'mymemory'
+        except Exception as e:
+            last_error = e
+            logger.warning(f"MyMemory attempt {attempt+1} failed: {type(e).__name__}")
     
-    # تلاش سوم: Baidu Translate
-    try:
-        translated = ts.baidu(text, from_language=source_lang, to_language=target_lang)
-        return translated, 'baidu'
-    except Exception as e:
-        logger.warning(f"Baidu Translate failed: {e}")
-    
-    # اگر همه شکست خوردند
-    raise Exception("تمام سرویس‌های ترجمه در دسترس نیستند. لطفاً چند دقیقه بعد دوباره تلاش کنید.")
+    raise Exception(f"ترجمه انجام نشد. لطفاً ۱ دقیقه بعد دوباره تلاش کنید.")
 
 # ==========================================================
-# 🤖 هندلرهای کامل و عملیاتی
+# 🤖 هندلرها
 # ==========================================================
 def get_main_keyboard(user_id):
     kb = [
@@ -204,13 +210,13 @@ async def smart_assistant_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.callback_query.answer()
     context.user_data['chat_mode'] = True
     kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-    await update.callback_query.edit_message_text("🤖 **دستیار هوشمند فعال شد!**\n\nمتن خود را بفرستید (برای ترجمه یا پرسش سوال).", reply_markup=InlineKeyboardMarkup(kb))
+    await update.callback_query.edit_message_text("🤖 **دستیار هوشمند فعال شد!**\n\nمتن خود را بفرستید.", reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_langs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    langs = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩 آلمانی', 'tr': '🇹🇷 ترکی'}
+    langs = {'fa': '🇮🇷 فارسی', 'en': '🇬 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹🇷 ترکی'}
     kb = [[InlineKeyboardButton(name, callback_data=f'lang_{code}')] for code, name in langs.items()]
-    kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')])
+    kb.append([InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')])
     await update.callback_query.edit_message_text("🎯 زبان مقصد را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb))
     context.user_data['action'] = 'select_language'
 
@@ -220,27 +226,49 @@ async def handle_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     langs = {'fa': 'فارسی', 'en': 'انگلیسی', 'ar': 'عربی', 'fr': 'فرانسوی', 'de': 'آلمانی', 'tr': 'ترکی'}
     context.user_data['target_lang'] = code
     context.user_data['action'] = 'waiting_for_text'
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(f"✅ زبان {langs[code]} انتخاب شد.\nمتن خود را بفرستید:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     key = db.get_or_create_user(update.effective_user.id)
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(f"🔑 **کلید امنیتی شما:**\n\n`{key}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     stats = db.get_user_stats(update.effective_user.id)
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
     if stats and stats[0] > 0:
-        msg = f"📊 **آمار شما:**\n\n🔢 تعداد ترجمه‌ها: {stats[0]}\n📝 مجموع کلمات: {stats[1]}\n🕒 آخرین فعالیت: {str(stats[2])[:16] if stats[2] else 'ندارد'}"
+        last_act = str(stats[2])[:16] if stats[2] else 'ندارد'
+        msg = f"📊 **آمار شما:**\n\n🔢 تعداد ترجمه‌ها: {stats[0]}\n📝 مجموع کلمات: {stats[1]}\n🕒 آخرین فعالیت: {last_act}"
     else:
         msg = "📊 **آمار شما:**\n\nهنوز ترجمه‌ای انجام نداده‌اید!"
     await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
 # ==========================================================
-# ⚙️ هندلرهای عملیاتی (عکس، صوت، فایل، متن)
+# 🖼️🎤📄 Handlerهای دکمه‌های عکس/صوت/فایل (که قبلاً نبودند!)
+# ==========================================================
+async def translate_photo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data['action'] = 'waiting_for_photo'
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
+    await update.callback_query.edit_message_text("🖼️ لطفاً عکس مورد نظر را بفرستید:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def translate_voice_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data['action'] = 'waiting_for_voice'
+    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    await update.callback_query.edit_message_text("🎤 لطفاً پیام صوتی خود را بفرستید:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def translate_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data['action'] = 'waiting_for_file'
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
+    await update.callback_query.edit_message_text("📄 لطفاً فایل خود را بفرستید (PDF, DOCX, TXT):", reply_markup=InlineKeyboardMarkup(kb))
+
+# ==========================================================
+# ⚙️ Handlerهای عملیاتی
 # ==========================================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -253,9 +281,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('chat_mode'):
         try:
             translated, engine = smart_translate(text, target_lang='fa')
-            response = f"🔄 **ترجمه:**\n\n{translated}"
+            response = f"🔄 **ترجمه ({engine}):**\n\n{translated}"
         except Exception as e:
-            response = f"❌ خطا در ترجمه: {str(e)}"
+            response = f"❌ {str(e)}"
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         return
@@ -266,9 +294,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             translated_text, engine = smart_translate(text, target_lang=target_lang)
             db.save_translation(user_id, text, translated_text, 'auto', target_lang)
             kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
-            await update.message.reply_text(f"✅ ترجمه شد:\n\n📝 {translated_text}", reply_markup=InlineKeyboardMarkup(kb))
+            await update.message.reply_text(f"✅ ترجمه شد ({engine}):\n\n📝 {translated_text}", reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
-            await update.message.reply_text(f"❌ خطا در ترجمه: {str(e)}")
+            await update.message.reply_text(f"❌ {str(e)}")
         context.user_data['action'] = None
         return
 
@@ -294,15 +322,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ متنی در تصویر پیدا نشد. لطفاً تصویر واضح‌تری بفرستید.", reply_markup=get_main_keyboard(user_id))
             return
             
-        target_lang = 'fa'
+        target_lang = context.user_data.get('target_lang', 'fa')
         translated, engine = smart_translate(text, target_lang=target_lang)
         db.save_translation(user_id, "Image", translated, "image", target_lang)
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-        await update.message.reply_text(f"✅ متن استخراج و ترجمه شد:\n\n📝 {translated}", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text(f"✅ متن استخراج و ترجمه شد ({engine}):\n\n📝 {translated}", reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
         logger.error(f"Photo error: {e}")
-        await update.message.reply_text("❌ خطا در پردازش تصویر. لطفاً دوباره تلاش کنید.", reply_markup=get_main_keyboard(user_id))
+        await update.message.reply_text("❌ خطا در پردازش تصویر.", reply_markup=get_main_keyboard(user_id))
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -331,7 +359,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 text = recognizer.recognize_google(audio, language='en-US')
             except sr.UnknownValueError:
-                await update.message.reply_text("⚠️ صدا به وضوح تشخیص داده نشد. لطفاً واضح‌تر صحبت کنید.", reply_markup=get_main_keyboard(user_id))
+                await update.message.reply_text("⚠️ صدا تشخیص داده نشد.", reply_markup=get_main_keyboard(user_id))
                 os.remove(ogg_path); os.remove(wav_path)
                 return
                 
@@ -341,10 +369,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_translation(user_id, "Voice", translated, "voice", 'fa')
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-        await update.message.reply_text(f"✅ صوت ترجمه شد:\n\n📝 {translated}", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text(f"✅ صوت ترجمه شد ({engine}):\n\n📝 {translated}", reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await update.message.reply_text("❌ خطا در پردازش صوت. لطفاً دوباره تلاش کنید.", reply_markup=get_main_keyboard(user_id))
+        await update.message.reply_text("❌ خطا در پردازش صوت.", reply_markup=get_main_keyboard(user_id))
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -382,28 +410,72 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("translated.txt", "w", encoding="utf-8") as f: f.write(translated)
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-        await update.message.reply_document(document=open("translated.txt", "rb"), caption="✅ فایل با موفقیت ترجمه شد!", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_document(document=open("translated.txt", "rb"), caption=f"✅ فایل ترجمه شد ({engine})!", reply_markup=InlineKeyboardMarkup(kb))
         os.remove(path); os.remove("translated.txt")
     except Exception as e:
         logger.error(f"Document error: {e}")
-        await update.message.reply_text(" خطا در خواندن فایل. مطمئن شوید فایل متنی و سالم است.", reply_markup=get_main_keyboard(user_id))
+        await update.message.reply_text("❌ خطا در خواندن فایل.", reply_markup=get_main_keyboard(user_id))
 
+# ==========================================================
+# 🛡️ پنل مدیریت کامل
+# ==========================================================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in Config.ADMIN_IDS:
         await update.callback_query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
         return
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-    await update.callback_query.edit_message_text("️ پنل مدیریت فعال است. (قابلیت‌های پیشرفته در نسخه بعدی اضافه می‌شود)", reply_markup=InlineKeyboardMarkup(kb))
+    
+    stats = db.get_admin_dashboard()
+    kb = [
+        [InlineKeyboardButton("📢 ارسال پیام همگانی", callback_data='admin_broadcast')],
+        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]
+    ]
+    msg = (f"🛡️ **پنل مدیریت**\n\n"
+           f"👥 کل کاربران: {stats['total_users']}\n"
+           f"✅ کاربران فعال (۷ روز): {stats['active_users']}\n"
+           f"📝 کل ترجمه‌ها: {stats['total_translations']:,}")
+    await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in Config.ADMIN_IDS:
+        await update.callback_query.answer("⛔ غیرمجاز!", show_alert=True)
+        return
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("متن پیام همگانی را بفرستید (یا /cancel برای انصراف):")
+    context.user_data['admin_action'] = 'wait_broadcast_msg'
+
+async def handle_admin_broadcast_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in Config.ADMIN_IDS: return
+    if context.user_data.get('admin_action') != 'wait_broadcast_msg': return
+    
+    msg = update.message.text
+    users = db.get_all_user_ids()
+    success = 0
+    
+    await update.message.reply_text(f"⏳ در حال ارسال به {len(users)} کاربر...")
+    
+    for uid in users:
+        try:
+            await update.message.bot.send_message(chat_id=uid, text=f"📢 **پیام ادمین:**\n\n{msg}", parse_mode='Markdown')
+            success += 1
+            time.sleep(0.05)
+        except Exception:
+            pass
+            
+    await update.message.reply_text(f"✅ ارسال تکمیل شد!\nموفق: {success} | ناموفق: {len(users) - success}")
+    context.user_data['admin_action'] = None
 
 # ==========================================================
 # ▶️ اجرای اصلی
 # ==========================================================
 def main():
-    logger.info(" شروع راه‌اندازی ربات...")
+    logger.info("🚀 شروع راه‌اندازی ربات...")
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
+    # دستورات
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", lambda u, c: (c.user_data.clear(), u.message.reply_text("❌ انصراف داده شد."))[1]))
     
+    # Callback handlers - **همه دکمه‌ها**
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$'))
     app.add_handler(CallbackQueryHandler(consent_device, pattern='^consent_device$'))
     app.add_handler(CallbackQueryHandler(decline_device, pattern='^decline_device$'))
@@ -413,11 +485,19 @@ def main():
     app.add_handler(CallbackQueryHandler(show_key, pattern='^show_key$'))
     app.add_handler(CallbackQueryHandler(show_stats, pattern='^my_stats$'))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
+    app.add_handler(CallbackQueryHandler(admin_broadcast, pattern='^admin_broadcast$'))
     
+    # ✅ Handlerهای جدید برای دکمه‌های عکس/صوت/فایل
+    app.add_handler(CallbackQueryHandler(translate_photo_info, pattern='^translate_photo$'))
+    app.add_handler(CallbackQueryHandler(translate_voice_info, pattern='^translate_voice$'))
+    app.add_handler(CallbackQueryHandler(translate_file_info, pattern='^translate_file$'))
+    
+    # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^.*$'), handle_admin_broadcast_msg))
     
     webhook_url = f"{Config.RENDER_URL}/{Config.BOT_TOKEN}"
     logger.info("✅ ربات با Webhook فعال شد!")
