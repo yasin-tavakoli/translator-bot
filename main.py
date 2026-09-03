@@ -1,4 +1,4 @@
-import os, time, logging, sqlite3, speech_recognition as sr
+import os, time, logging, speech_recognition as sr
 from datetime import datetime, timedelta
 from collections import defaultdict
 from cryptography.fernet import Fernet
@@ -11,6 +11,8 @@ from docx import Document
 from PIL import Image
 import pytesseract
 from pydub import AudioSegment
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ==========================================================
 # ⚙️ تنظیمات
@@ -18,67 +20,81 @@ from pydub import AudioSegment
 class Config:
     BOT_TOKEN = "8791676273:AAEIw5JaJmZk9f7YqOdO1Xq1Fm0KBkvteTQ"
     ADMIN_IDS = [5138190544]
-    MAX_FILE_SIZE = 20971520  # 20MB
+    MAX_FILE_SIZE = 20971520
     RATE_LIMIT = 50
     MAX_TEXT_LENGTH = 5000
     ALLOWED_FILE_TYPES = ['pdf', 'docx', 'txt']
     RENDER_URL = "https://translator-bot-z4wh.onrender.com"
+    # لینک اتصال Supabase
+    DATABASE_URL = "postgresql://postgres:YasinBot2026%21Secure@db.qwhkjpljsaledhqbgkbp.supabase.co:5432/postgres"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==========================================================
-# 🗄️ دیتابیس پیشرفته
+# ️ دیتابیس Supabase (پایدار و ابری)
 # ==========================================================
 class SecureDatabase:
     def __init__(self):
-        self.conn = sqlite3.connect('bot_data.db', check_same_thread=False)
-        self.init_tables()
+        self.conn = psycopg2.connect(Config.DATABASE_URL)
+        logger.info("✅ اتصال به دیتابیس ابری Supabase برقرار شد")
     
-    def init_tables(self):
-        c = self.conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, secret_key TEXT, consent_given INTEGER DEFAULT 0, chat_consent INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS translations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, encrypted_source TEXT, encrypted_target TEXT, source_lang TEXT, target_lang TEXT, is_favorite INTEGER DEFAULT 0, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_stats (user_id INTEGER PRIMARY KEY, total_translations INTEGER DEFAULT 0, total_words INTEGER DEFAULT 0, last_activity DATETIME, theme TEXT DEFAULT 'light')''')
-        c.execute('''CREATE TABLE IF NOT EXISTS favorites (user_id INTEGER, translation_id INTEGER, PRIMARY KEY (user_id, translation_id))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admin_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER, action TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admin_chat (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, message TEXT, sender TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        self.conn.commit()
-    
-    def generate_secret_key(self): return Fernet.generate_key().decode()
+    def generate_secret_key(self): 
+        return Fernet.generate_key().decode()
     
     def get_or_create_user(self, user_id, username=None, first_name=None):
-        c = self.conn.cursor()
-        c.execute('SELECT secret_key FROM users WHERE user_id = ?', (user_id,))
+        c = self.conn.cursor(cursor_factory=RealDictCursor)
+        c.execute('SELECT secret_key FROM users WHERE user_id = %s', (user_id,))
         r = c.fetchone()
-        if r: return r[0]
+        if r:
+            c.execute('UPDATE users SET last_active = NOW() WHERE user_id = %s', (user_id,))
+            self.conn.commit()
+            return r['secret_key']
+        
         new_key = self.generate_secret_key()
-        c.execute('INSERT INTO users (user_id, username, first_name, secret_key) VALUES (?, ?, ?, ?)', (user_id, username, first_name, new_key))
-        c.execute('INSERT OR IGNORE INTO user_stats (user_id) VALUES (?)', (user_id,))
+        c.execute('''INSERT INTO users (user_id, username, first_name, secret_key, last_active) 
+                     VALUES (%s, %s, %s, %s, NOW())''', 
+                  (user_id, username, first_name, new_key))
+        c.execute('INSERT INTO user_stats (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING', (user_id,))
         self.conn.commit()
         return new_key
     
-    def encrypt(self, text, key): return Fernet(key.encode()).encrypt(text.encode()).decode() if text else ""
-    def decrypt(self, encrypted_text, key):
-        try: return Fernet(key.encode()).decrypt(encrypted_text.encode()).decode() if encrypted_text else ""
-        except: return "[خطا]"
+    def encrypt(self, text, key): 
+        return Fernet(key.encode()).encrypt(text.encode()).decode() if text else ""
     
-    def save_translation(self, user_id, source_text, translated_text, source_lang, target_lang):
+    def decrypt(self, encrypted_text, key):
+        try: 
+            return Fernet(key.encode()).decrypt(encrypted_text.encode()).decode() if encrypted_text else ""
+        except: 
+            return "[خطا]"
+    
+    def save_translation(self, user_id, source_text, translated_text, source_lang, target_lang, trans_type='text'):
         key = self.get_or_create_user(user_id)
         c = self.conn.cursor()
-        c.execute('INSERT INTO translations (user_id, encrypted_source, encrypted_target, source_lang, target_lang) VALUES (?, ?, ?, ?, ?)', (user_id, self.encrypt(source_text, key), self.encrypt(translated_text, key), source_lang, target_lang))
-        trans_id = c.lastrowid
+        
+        encrypted_source = self.encrypt(source_text, key)
+        encrypted_target = self.encrypt(translated_text, key)
         word_count = len(source_text.split())
-        c.execute('SELECT total_translations, total_words FROM user_stats WHERE user_id = ?', (user_id,))
-        stats = c.fetchone()
-        if stats:
-            c.execute('UPDATE user_stats SET total_translations = ?, total_words = ?, last_activity = ? WHERE user_id = ?', (stats[0] + 1, stats[1] + word_count, datetime.now(), user_id))
+        
+        c.execute('''INSERT INTO translations 
+            (user_id, encrypted_source, encrypted_target, source_lang, target_lang, translation_type, word_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id''',
+            (user_id, encrypted_source, encrypted_target, source_lang, target_lang, trans_type, word_count))
+        
+        trans_id = c.fetchone()[0]
+        
+        c.execute('''UPDATE user_stats SET 
+            total_translations = total_translations + 1, 
+            total_words = total_words + %s, 
+            last_activity = NOW()
+            WHERE user_id = %s''', (word_count, user_id))
+        
         self.conn.commit()
         return trans_id
 
     def get_user_stats(self, user_id):
         c = self.conn.cursor()
-        c.execute('SELECT total_translations, total_words, last_activity FROM user_stats WHERE user_id = ?', (user_id,))
+        c.execute('SELECT total_translations, total_words, last_activity FROM user_stats WHERE user_id = %s', (user_id,))
         return c.fetchone()
     
     def get_all_user_ids(self):
@@ -94,14 +110,24 @@ class SecureDatabase:
 
     def has_consent(self, user_id):
         c = self.conn.cursor()
-        c.execute('SELECT consent_given FROM users WHERE user_id = ?', (user_id,))
+        c.execute('SELECT consent_given FROM users WHERE user_id = %s', (user_id,))
         r = c.fetchone()
-        return r and r[0] == 1
+        return r and r[0]
 
     def save_device_info(self, user_id, info):
         c = self.conn.cursor()
-        c.execute('UPDATE users SET device_info = ?, consent_given = 1 WHERE user_id = ?', (info, user_id))
+        c.execute('UPDATE users SET device_info = %s, consent_given = TRUE WHERE user_id = %s', (info, user_id))
         self.conn.commit()
+    
+    def save_chat_message(self, user_id, message, sender):
+        c = self.conn.cursor()
+        c.execute('INSERT INTO admin_chat (user_id, message, sender) VALUES (%s, %s, %s)', (user_id, message, sender))
+        self.conn.commit()
+    
+    def get_chat_history(self, user_id, limit=20):
+        c = self.conn.cursor()
+        c.execute('SELECT message, sender, timestamp FROM admin_chat WHERE user_id = %s ORDER BY timestamp DESC LIMIT %s', (user_id, limit))
+        return c.fetchall()[::-1]
 
 db = SecureDatabase()
 
@@ -124,7 +150,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = db.get_or_create_user(user.id, user.username, user.first_name)
     
     if 'secret_shown' not in context.user_data:
-        await update.message.reply_text(f"🔐 **امانت امنیتی شما**\n\nکلید: `{key}`\n\n⚠️ این کلید را ذخیره کنید.", parse_mode='Markdown')
+        await update.message.reply_text(f" **امانت امنیتی شما**\n\nکلید: `{key}`\n\n⚠️ این کلید را ذخیره کنید.", parse_mode='Markdown')
         context.user_data['secret_shown'] = True
 
     if not db.has_consent(user.id):
@@ -140,7 +166,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data['chat_mode'] = False
     context.user_data['action'] = None
-    await update.callback_query.edit_message_text("🏠 به منوی اصلی بازگشتید.", reply_markup=get_main_keyboard(update.effective_user.id))
+    await update.callback_query.edit_message_text(" به منوی اصلی بازگشتید.", reply_markup=get_main_keyboard(update.effective_user.id))
 
 async def smart_assistant_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -159,7 +185,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # ۱. حالت دستیار هوشمند
     if context.user_data.get('chat_mode'):
         text_lower = text.lower()
         if "سلام" in text_lower or "درود" in text_lower:
@@ -167,9 +192,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "کاربرد" in text_lower or "چیکار" in text_lower:
             response = "من می‌تونم متن، عکس، فایل (PDF/Word) و حتی پیام صوتی شما را با امنیت کامل ترجمه کنم! 🌍"
         elif "ادمین" in text_lower or "سازنده" in text_lower:
-            response = "سازنده این ربات یک توسعه‌دهنده حرفه‌ای است که برای راحتی شما این ابزار را ساخته است. 💻"
+            response = "سازنده این ربات یک توسعه‌دهنده حرفه‌ای است که برای راحتی شما این ابزار را ساخته است. "
         else:
-            # اگر سوال نبود، فرض می‌کنیم کاربر می‌خواهد ترجمه کند
             try:
                 translated = GoogleTranslator(source='auto', target='fa').translate(text)
                 response = f"🔄 **ترجمه:**\n\n{translated}"
@@ -180,7 +204,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # ۲. ترجمه عادی (اگر در حالت انتخاب زبان باشد)
     if context.user_data.get('action') == 'waiting_for_text':
         target_lang = context.user_data.get('target_lang', 'fa')
         try:
@@ -194,14 +217,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['action'] = None
         return
 
-    # پیش‌فرض
     await update.message.reply_text("لطفاً ابتدا یک گزینه را از منوی اصلی انتخاب کنید. /start", reply_markup=get_main_keyboard(user_id))
 
 async def show_langs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    langs = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹🇷 ترکی'}
+    langs = {'fa': '🇮 فارسی', 'en': '🇬 انگلیسی', 'ar': '🇦 عربی', 'fr': '🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹🇷 ترکی'}
     kb = [[InlineKeyboardButton(name, callback_data=f'lang_{code}')] for code, name in langs.items()]
-    kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')])
+    kb.append([InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')])
     await update.callback_query.edit_message_text("🎯 زبان مقصد را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb))
     context.user_data['action'] = 'select_language'
 
@@ -217,7 +239,7 @@ async def handle_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     key = db.get_or_create_user(update.effective_user.id)
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(f"🔑 **کلید امنیتی شما:**\n\n`{key}`", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
 async def consent_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,18 +257,15 @@ async def placeholder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text("این قابلیت به زودی اضافه می‌شود! 🚀", reply_markup=InlineKeyboardMarkup(kb))
 
-# ==========================================================
-# 🛡️ پنل مدیریت
-# ==========================================================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in Config.ADMIN_IDS:
-        await update.callback_query.answer("⛔ غیرمجاز!", show_alert=True)
+        await update.callback_query.answer(" غیرمجاز!", show_alert=True)
         return
     
     stats = db.get_admin_dashboard()
     kb = [
         [InlineKeyboardButton("📢 ارسال پیام همگانی دستی", callback_data='admin_broadcast_manual')],
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]
+        [InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]
     ]
     msg = (f"🛡️ **پنل مدیریت**\n\n"
            f"👥 کل کاربران: {stats['total_users']}\n"
@@ -272,16 +291,13 @@ async def handle_admin_broadcast_msg(update: Update, context: ContextTypes.DEFAU
         try:
             await update.message.bot.send_message(chat_id=uid, text=f"📢 **پیام ادمین:**\n\n{msg}", parse_mode='Markdown')
             success += 1
-            time.sleep(0.05) # جلوگیری از محدودیت تلگرام
+            time.sleep(0.05)
         except Exception:
-            pass # اگر کاربر ربات را بلاک کرده باشد، رد می‌شود
+            pass
             
     await update.message.reply_text(f"✅ ارسال تکمیل شد!\nموفق: {success} | ناموفق: {len(users) - success}")
     context.user_data['admin_action'] = None
 
-# ==========================================================
-# 📢 اطلاع‌رسانی خودکار آپدیت
-# ==========================================================
 def send_update_notification(app):
     users = db.get_all_user_ids()
     if not users:
@@ -290,6 +306,7 @@ def send_update_notification(app):
         
     msg = (
         "🎉 **ربات به‌روزرسانی شد!**\n\n"
+        "✅ دیتابیس ابری Supabase (داده‌ها دیگر پاک نمی‌شوند!)\n"
         "✅ افزودن دکمه بازگشت به منو در تمام صفحات\n"
         "✅ اضافه شدن دستیار هوشمند برای پاسخ به سوالات شما\n"
         "✅ بهبود سرعت و امنیت سرور\n\n"
@@ -305,13 +322,10 @@ def send_update_notification(app):
             success += 1
             time.sleep(0.05)
         except Exception as e:
-            pass # کاربر ربات را استارت نکرده یا بلاک کرده است
+            pass
             
     logger.info(f"✅ پیام آپدیت با موفقیت به {success} کاربر از {len(users)} کاربر ارسال شد.")
 
-# ==========================================================
-# ▶️ اجرای اصلی
-# ==========================================================
 def main():
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
@@ -327,17 +341,15 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     app.add_handler(CallbackQueryHandler(admin_broadcast_manual, pattern='^admin_broadcast_manual$'))
     
-    # دکمه‌های جایگاه‌خالی (برای عکس، فایل و...)
     app.add_handler(CallbackQueryHandler(placeholder, pattern='^(translate_photo|translate_voice|translate_file|my_stats)$'))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^.*$'), handle_admin_broadcast_msg)) # برای دریافت پیام همگانی ادمین
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^.*$'), handle_admin_broadcast_msg))
     
     webhook_url = f"{Config.RENDER_URL}/{Config.BOT_TOKEN}"
     
     logger.info("✅ ربات با Webhook فعال شد! در حال تنظیم اطلاع‌رسانی آپدیت...")
     
-    # ارسال پیام آپدیت قبل از شروع گوش دادن به پیام‌ها
     send_update_notification(app)
     
     app.run_webhook(
