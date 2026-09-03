@@ -15,7 +15,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # ==========================================================
-# ⚙️ تنظیمات
+# ️ تنظیمات
 # ==========================================================
 class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN', '8791676273:AAEIw5JaJmZk9f7YqOdO1Xq1Fm0KBkvteTQ')
@@ -153,7 +153,7 @@ def smart_translate(text, target_lang='fa', source_lang='auto'):
                 logger.info("⚠️ خطای 500 گوگل - صبر بیشتر...")
                 time.sleep(3)
     
-    raise Exception(f"ترجمه انجام نشد. لطفاً  دقیقه بعد دوباره تلاش کنید.")
+    raise Exception(f"ترجمه انجام نشد. لطفاً 1 دقیقه بعد دوباره تلاش کنید.")
 
 # ==========================================================
 # 🤖 Keyboard اصلی
@@ -163,8 +163,8 @@ def get_main_keyboard(user_id):
         [InlineKeyboardButton("🌐 ترجمه متن", callback_data='translate_text'), 
          InlineKeyboardButton("🖼️ ترجمه عکس", callback_data='translate_photo')],
         [InlineKeyboardButton("🎤 ترجمه صوتی", callback_data='translate_voice'), 
-         InlineKeyboardButton("📄 ترجمه فایل", callback_data='translate_file')],
-        [InlineKeyboardButton(" دستیار هوشمند", callback_data='smart_assistant'), 
+         InlineKeyboardButton(" ترجمه فایل", callback_data='translate_file')],
+        [InlineKeyboardButton("🤖 دستیار هوشمند", callback_data='smart_assistant'), 
          InlineKeyboardButton("📊 آمار من", callback_data='my_stats')],
         [InlineKeyboardButton("🔑 کلید امنیتی", callback_data='show_key')]
     ]
@@ -189,10 +189,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not db.has_consent(user.id):
         kb = [
             [InlineKeyboardButton("✅ موافقم", callback_data='consent_device')],
-            [InlineKeyboardButton("❌ رد می‌کنم", callback_data='decline_device')]
+            [InlineKeyboardButton(" رد می‌کنم", callback_data='decline_device')]
         ]
         await update.message.reply_text(
-            " ذخیره نام و یوزرنیم برای بهبود خدمات. موافقید؟",
+            "📱 ذخیره نام و یوزرنیم برای بهبود خدمات. موافقید؟",
             reply_markup=InlineKeyboardMarkup(kb)
         )
         return
@@ -217,7 +217,7 @@ async def consent_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def decline_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(
-        "❌ بدون ذخیره اطلاعات ادامه می‌دهیم.",
+        " بدون ذخیره اطلاعات ادامه می‌دهیم.",
         reply_markup=get_main_keyboard(update.effective_user.id)
     )
 
@@ -243,12 +243,12 @@ async def smart_assistant_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def show_langs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    langs = {'fa': '🇮 فارسی', 'en': '🇬 انگلیسی', 'ar': '🇦 عربی', 
-             'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹🇷 ترکی'}
+    langs = {'fa': '🇮🇷 فارسی', 'en': '🇧 انگلیسی', 'ar': '🇸🇦 عربی', 
+             'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹 ترکی'}
     kb = [[InlineKeyboardButton(name, callback_data=f'lang_{code}')] for code, name in langs.items()]
     kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')])
     await update.callback_query.edit_message_text(
-        "🎯 زبان مقصد را انتخاب کنید:",
+        " زبان مقصد را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
     context.user_data['action'] = 'select_language'
@@ -293,14 +293,14 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ==========================================================
-# ️🎤📄 Handlerهای دکمه‌های عکس/صوت/فایل
+# 🖼️🎤📄 Handlerهای دکمه‌های عکس/صوت/فایل
 # ==========================================================
 async def translate_photo_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data['action'] = 'waiting_for_photo'
     kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(
-        "️ لطفاً عکس مورد نظر را بفرستید:",
+        "🖼️ لطفاً عکس مورد نظر را بفرستید:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
@@ -316,29 +316,29 @@ async def translate_voice_info(update: Update, context: ContextTypes.DEFAULT_TYP
 async def translate_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     context.user_data['action'] = 'waiting_for_file'
-    kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+    kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(
         "📄 لطفاً فایل خود را بفرستید (PDF, DOCX, TXT):",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
 # ==========================================================
-# 🛡️ پنل مدیریت
+# ️ پنل مدیریت
 # ==========================================================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in Config.ADMIN_IDS:
-        await update.callback_query.answer(" دسترسی غیرمجاز!", show_alert=True)
+        await update.callback_query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
         return
     
     stats = db.get_admin_dashboard()
     kb = [
-        [InlineKeyboardButton(" ارسال پیام همگانی", callback_data='admin_broadcast')],
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]
+        [InlineKeyboardButton("📢 ارسال پیام همگانی", callback_data='admin_broadcast')],
+        [InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]
     ]
     msg = (f"🛡️ **پنل مدیریت**\n\n"
            f"👥 کل کاربران: {stats['total_users']}\n"
            f"✅ کاربران فعال (۷ روز): {stats['active_users']}\n"
-           f" کل ترجمه‌ها: {stats['total_translations']:,}")
+           f"📝 کل ترجمه‌ها: {stats['total_translations']:,}")
     await update.callback_query.edit_message_text(
         msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
     )
@@ -348,7 +348,6 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer("⛔ غیرمجاز!", show_alert=True)
         return
     await update.callback_query.answer()
-    # فقط state را set می‌کنیم - عملیات در handle_text انجام می‌شود
     context.user_data['admin_action'] = 'wait_broadcast_msg'
     kb = [[InlineKeyboardButton("❌ انصراف", callback_data='back_to_menu')]]
     await update.callback_query.edit_message_text(
@@ -363,39 +362,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    #  اولویت ۱: پیام همگانی ادمین
+    # 🥇 اولویت : پیام همگانی ادمین
     if context.user_data.get('admin_action') == 'wait_broadcast_msg':
         if user_id in Config.ADMIN_IDS:
             users = db.get_all_user_ids()
             success = 0
             failed = 0
+            failed_details = []
             
             await update.message.reply_text(f"⏳ در حال ارسال به {len(users)} کاربر...")
             
             for uid in users:
                 try:
+                    # ارسال به صورت متن ساده (بدون Markdown) برای جلوگیری از خطا
                     await update.message.bot.send_message(
                         chat_id=uid,
-                        text=f"📢 **پیام ادمین:**\n\n{text}",
-                        parse_mode='Markdown'
+                        text=f"📢 پیام ادمین:\n\n{text}"
                     )
                     success += 1
                     time.sleep(0.05)
                 except Exception as e:
                     failed += 1
-                    logger.warning(f"Failed to send to {uid}: {e}")
+                    error_detail = f"User {uid}: {str(e)[:80]}"
+                    failed_details.append(error_detail)
+                    logger.warning(f"Broadcast failed for {uid}: {e}")
             
-            await update.message.reply_text(
+            result_msg = (
                 f"✅ ارسال تکمیل شد!\n\n"
-                f" آمار:\n"
+                f"📊 آمار:\n"
                 f"✅ موفق: {success}\n"
                 f"❌ ناموفق: {failed}\n"
-                f"👥 کل: {len(users)}"
+                f" کل: {len(users)}"
             )
+            
+            if failed_details:
+                result_msg += "\n\n⚠️ جزئیات خطا:\n"
+                for detail in failed_details[:3]:
+                    result_msg += f"• {detail}\n"
+            
+            await update.message.reply_text(result_msg)
             context.user_data['admin_action'] = None
         else:
             context.user_data['admin_action'] = None
-            await update.message.reply_text("❌ انصراف داده شد.")
+            await update.message.reply_text(" انصراف داده شد.")
         return
 
     # 🥈 اولویت ۲: Rate Limiting
@@ -410,7 +419,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = f"🔄 **ترجمه:**\n\n{translated}"
         except Exception as e:
             response = f"❌ {str(e)}"
-        kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+        kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
         await update.message.reply_text(
             response, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
         )
@@ -467,13 +476,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
         await update.message.reply_text(
-            f"✅ متن استخراج و ترجمه شد:\n\n {translated}",
+            f"✅ متن استخراج و ترجمه شد:\n\n📝 {translated}",
             reply_markup=InlineKeyboardMarkup(kb)
         )
     except Exception as e:
         logger.error(f"Photo error: {e}")
         await update.message.reply_text(
-            "❌ خطا در پردازش تصویر.",
+            " خطا در پردازش تصویر.",
             reply_markup=get_main_keyboard(user_id)
         )
 
@@ -604,7 +613,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ▶️ اجرای اصلی
 # ==========================================================
 def main():
-    logger.info("🚀 شروع راه‌اندازی ربات...")
+    logger.info(" شروع راه‌اندازی ربات...")
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
     # دستورات
