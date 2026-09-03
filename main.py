@@ -4,7 +4,7 @@ from collections import defaultdict
 from cryptography.fernet import Fernet
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from deep_translator import GoogleTranslator
+import translators as ts
 from gtts import gTTS
 import PyPDF2
 from docx import Document
@@ -120,13 +120,47 @@ class SecureDatabase:
 db = SecureDatabase()
 
 # ==========================================================
+# 🌐 سیستم ترجمه هوشمند با چندین موتور
+# ==========================================================
+def smart_translate(text, target_lang='fa', source_lang='auto'):
+    """
+    ترجمه هوشمند با fallback به چندین موتور
+    """
+    # تاخیر کوتاه برای جلوگیری از rate limit
+    time.sleep(0.5)
+    
+    # تلاش اول: Google Translate (از طریق translators)
+    try:
+        translated = ts.google(text, from_language=source_lang, to_language=target_lang)
+        return translated, 'google'
+    except Exception as e:
+        logger.warning(f"Google Translate failed: {e}")
+    
+    # تلاش دوم: Bing Translator
+    try:
+        translated = ts.bing(text, from_language=source_lang, to_language=target_lang)
+        return translated, 'bing'
+    except Exception as e:
+        logger.warning(f"Bing Translate failed: {e}")
+    
+    # تلاش سوم: Baidu Translate
+    try:
+        translated = ts.baidu(text, from_language=source_lang, to_language=target_lang)
+        return translated, 'baidu'
+    except Exception as e:
+        logger.warning(f"Baidu Translate failed: {e}")
+    
+    # اگر همه شکست خوردند
+    raise Exception("تمام سرویس‌های ترجمه در دسترس نیستند. لطفاً چند دقیقه بعد دوباره تلاش کنید.")
+
+# ==========================================================
 # 🤖 هندلرهای کامل و عملیاتی
 # ==========================================================
 def get_main_keyboard(user_id):
     kb = [
         [InlineKeyboardButton("🌐 ترجمه متن", callback_data='translate_text'), InlineKeyboardButton("🖼️ ترجمه عکس", callback_data='translate_photo')],
         [InlineKeyboardButton("🎤 ترجمه صوتی", callback_data='translate_voice'), InlineKeyboardButton("📄 ترجمه فایل", callback_data='translate_file')],
-        [InlineKeyboardButton("🤖 دستیار هوشمند", callback_data='smart_assistant'), InlineKeyboardButton("📊 آمار من", callback_data='my_stats')],
+        [InlineKeyboardButton(" دستیار هوشمند", callback_data='smart_assistant'), InlineKeyboardButton("📊 آمار من", callback_data='my_stats')],
         [InlineKeyboardButton("🔑 کلید امنیتی", callback_data='show_key')]
     ]
     if user_id in Config.ADMIN_IDS:
@@ -138,7 +172,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = db.get_or_create_user(user.id, user.username, user.first_name)
     
     if 'secret_shown' not in context.user_data:
-        await update.message.reply_text(f"🔐 **امانت امنیتی شما**\n\nکلید: `{key}`\n\n⚠️ این کلید را ذخیره کنید.", parse_mode='Markdown')
+        await update.message.reply_text(f" **امانت امنیتی شما**\n\nکلید: `{key}`\n\n⚠️ این کلید را ذخیره کنید.", parse_mode='Markdown')
         context.user_data['secret_shown'] = True
 
     if not db.has_consent(user.id):
@@ -158,7 +192,7 @@ async def consent_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def decline_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.edit_message_text("❌ بدون ذخیره اطلاعات ادامه می‌دهیم.", reply_markup=get_main_keyboard(update.effective_user.id))
+    await update.callback_query.edit_message_text(" بدون ذخیره اطلاعات ادامه می‌دهیم.", reply_markup=get_main_keyboard(update.effective_user.id))
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -174,7 +208,7 @@ async def smart_assistant_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def show_langs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    langs = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩🇪 آلمانی', 'tr': '🇹🇷 ترکی'}
+    langs = {'fa': '🇮🇷 فارسی', 'en': '🇬🇧 انگلیسی', 'ar': '🇸🇦 عربی', 'fr': '🇫🇷 فرانسوی', 'de': '🇩 آلمانی', 'tr': '🇹🇷 ترکی'}
     kb = [[InlineKeyboardButton(name, callback_data=f'lang_{code}')] for code, name in langs.items()]
     kb.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')])
     await update.callback_query.edit_message_text("🎯 زبان مقصد را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(kb))
@@ -218,10 +252,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get('chat_mode'):
         try:
-            translated = GoogleTranslator(source='auto', target='fa').translate(text)
+            translated, engine = smart_translate(text, target_lang='fa')
             response = f"🔄 **ترجمه:**\n\n{translated}"
-        except:
-            response = "سلام! 👋 چطور می‌تونم کمکت کنم؟ متنت رو برای ترجمه بفرست."
+        except Exception as e:
+            response = f"❌ خطا در ترجمه: {str(e)}"
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
         await update.message.reply_text(response, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         return
@@ -229,10 +263,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('action') == 'waiting_for_text':
         target_lang = context.user_data.get('target_lang', 'fa')
         try:
-            translator = GoogleTranslator(source='auto', target=target_lang)
-            translated_text = translator.translate(text)
-            db.save_translation(user_id, text, translated_text, translator._source, target_lang)
-            kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
+            translated_text, engine = smart_translate(text, target_lang=target_lang)
+            db.save_translation(user_id, text, translated_text, 'auto', target_lang)
+            kb = [[InlineKeyboardButton(" بازگشت به منو", callback_data='back_to_menu')]]
             await update.message.reply_text(f"✅ ترجمه شد:\n\n📝 {translated_text}", reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
             await update.message.reply_text(f"❌ خطا در ترجمه: {str(e)}")
@@ -262,7 +295,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         target_lang = 'fa'
-        translated = GoogleTranslator(source='auto', target=target_lang).translate(text)
+        translated, engine = smart_translate(text, target_lang=target_lang)
         db.save_translation(user_id, "Image", translated, "image", target_lang)
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
@@ -304,7 +337,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         os.remove(ogg_path); os.remove(wav_path)
         
-        translated = GoogleTranslator(source='auto', target='fa').translate(text)
+        translated, engine = smart_translate(text, target_lang='fa')
         db.save_translation(user_id, "Voice", translated, "voice", 'fa')
         
         kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
@@ -343,7 +376,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(text) > Config.MAX_TEXT_LENGTH:
             text = text[:Config.MAX_TEXT_LENGTH] + "\n\n(متن طولانی بود و خلاصه شد)"
             
-        translated = GoogleTranslator(source='auto', target='fa').translate(text)
+        translated, engine = smart_translate(text, target_lang='fa')
         db.save_translation(user_id, "File", translated, "file", 'fa')
         
         with open("translated.txt", "w", encoding="utf-8") as f: f.write(translated)
@@ -353,20 +386,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(path); os.remove("translated.txt")
     except Exception as e:
         logger.error(f"Document error: {e}")
-        await update.message.reply_text("❌ خطا در خواندن فایل. مطمئن شوید فایل متنی و سالم است.", reply_markup=get_main_keyboard(user_id))
+        await update.message.reply_text(" خطا در خواندن فایل. مطمئن شوید فایل متنی و سالم است.", reply_markup=get_main_keyboard(user_id))
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in Config.ADMIN_IDS:
         await update.callback_query.answer("⛔ دسترسی غیرمجاز!", show_alert=True)
         return
     kb = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data='back_to_menu')]]
-    await update.callback_query.edit_message_text("🛡️ پنل مدیریت فعال است. (قابلیت‌های پیشرفته در نسخه بعدی اضافه می‌شود)", reply_markup=InlineKeyboardMarkup(kb))
+    await update.callback_query.edit_message_text("️ پنل مدیریت فعال است. (قابلیت‌های پیشرفته در نسخه بعدی اضافه می‌شود)", reply_markup=InlineKeyboardMarkup(kb))
 
 # ==========================================================
 # ▶️ اجرای اصلی
 # ==========================================================
 def main():
-    logger.info("🚀 شروع راه‌اندازی ربات...")
+    logger.info(" شروع راه‌اندازی ربات...")
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
