@@ -493,11 +493,14 @@ def main():
     app.add_handler(CallbackQueryHandler(translate_file_info, pattern='^translate_file$'))
     
     # Message handlers
+    # ️ handler ادمین باید اول باشد (قبل از handle_text)
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^.*$'), handle_admin_broadcast_msg))
+    
+    # سپس handlerهای عمومی
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^.*$'), handle_admin_broadcast_msg))
     
     webhook_url = f"{Config.RENDER_URL}/{Config.BOT_TOKEN}"
     logger.info("✅ ربات با Webhook فعال شد!")
