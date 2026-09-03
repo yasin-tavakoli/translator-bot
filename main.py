@@ -26,8 +26,7 @@ class Config:
     MAX_TEXT_LENGTH = 5000
     ALLOWED_FILE_TYPES = ['pdf', 'docx', 'txt']
     RENDER_URL = os.getenv('RENDER_URL', 'https://translator-bot-z4wh.onrender.com')
-    postgresql://postgres.qwhkjpljsaledhqbgkbp:YasinBot2026%21Secure@aws-0-us-west-2.pooler.supabase.com:6543/postgres?pgbouncer=true
-    
+    DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres.qwhkjpljsaledhqbgkbp:YasinBot2026%21Secure@aws-0-us-west-2.pooler.supabase.com:6543/postgres?pgbouncer=true')    
     # تنظیمات امنیتی
     ENABLE_RATE_LIMIT = True
     ENABLE_LOGGING = True
