@@ -11,4 +11,3 @@ pydub
 flask
 requests
 psycopg2-binary
-translators
